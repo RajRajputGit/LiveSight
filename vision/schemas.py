@@ -48,18 +48,23 @@ class BoundingBox:
 
 @dataclass(frozen=True)
 class Detection:
-    """Normalized object detection representation."""
+    """Normalized object detection representation with optional tracking ID."""
 
     class_id: int
     class_name: str
     confidence: float
     bbox: BoundingBox
+    track_id: Optional[int] = None
 
     def __post_init__(self) -> None:
         """Validate detection fields."""
         if not (0.0 <= self.confidence <= 1.0):
             raise ValueError(
                 f"Confidence must be between 0.0 and 1.0, got {self.confidence}"
+            )
+        if self.track_id is not None and not isinstance(self.track_id, int):
+            raise TypeError(
+                f"track_id must be an int or None, got {type(self.track_id).__name__}"
             )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -69,4 +74,10 @@ class Detection:
             "class_name": self.class_name,
             "confidence": round(self.confidence, 4),
             "bbox": self.bbox.to_dict(),
+            "track_id": self.track_id,
         }
+
+
+# Track contract alias conforming to 03_WORKFLOW_AND_DATA_CONTRACTS.md
+Track = Detection
+

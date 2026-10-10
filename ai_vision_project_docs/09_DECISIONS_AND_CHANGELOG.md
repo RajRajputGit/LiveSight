@@ -58,7 +58,68 @@ For every decision that changes architecture, dependencies, data contracts, or d
 - Alternatives: Tightly couple OpenCV window drawing inside the detector loop.
 - Consequences: Vision pipeline components are testable, reusable in background tasks, and ready for Tracker integration in Phase 2.
 
+### ADR-007: ByteTrack Multi-Object Tracking Integration
+- Status: Accepted
+- Date: 2026-10-10
+- Context: Phase 2 requires tracking objects across consecutive frames with track IDs, handling occlusions, missing IDs, and tracker resets cleanly.
+- Decision: Integrate ByteTrack via Ultralytics with `bytetrack.yaml` and `lapx`; encapsulate tracking in `ByteTrackerAdapter` and `DetectionPipeline`; extend `Detection` schema with optional `track_id`; display `#<id>` in `FrameAnnotator`; provide Google Colab notebook for GPU benchmarking.
+- Alternatives: Implement custom SORT tracker or deep appearance ReID model.
+- Consequences: Lightweight CPU-compatible multi-object tracking; track IDs are scoped to the continuous video stream session and reset on stream restart.
+
+### ADR-008: Deterministic Rule Engine and Domain Event Model
+- Status: Accepted
+- Date: 2026-10-10
+- Context: Phase 3 requires evaluating tracked/detected objects against spatial rules (e.g. restricted zones), preventing duplicate event floods while an object remains inside, handling tracking dropouts, track expiry, and untracked detections gracefully, and producing structured domain event payloads adhering to the project event contract.
+- Decision: Implement a modular `rules` package (`geometry`, `schemas`, `restricted_zone`, `engine`). Use ray-casting point-in-polygon with deterministic boundary inclusion; track object spatial states (`ZoneState`: OUTSIDE, INSIDE, UNKNOWN); trigger `restricted_zone_intrusion` events exclusively on OUTSIDE -> INSIDE state transitions; implement re-entry cooldowns (default 5.0s), track expiry (default 2.0s), and untracked fallback spatial debouncing; encapsulate rules in `RuleEngine` loadable from JSON config (`configs/rules.json`); integrate seamlessly with `DetectionPipeline` and `FrameAnnotator` without breaking Phase 1 or Phase 2 APIs.
+- Alternatives Considered: Hardcode zone coordinates in the pipeline loop; re-evaluate events on every frame without state tracking; use external GIS dependencies (e.g. Shapely).
+- Consequences: Lightweight zero-extra-dependency implementation; 100% deterministic, testable in isolation from neural networks or video inputs; contracts match downstream Phase 4 FastAPI/SQLite schemas.
+
+### ADR-009: SQLite Event Persistence and Decoupled FastAPI Backend
+- Status: Accepted
+- Date: 2026-10-10
+- Context: Phase 4 requires persisting detected domain events so they survive restarts, providing HTTP endpoints for service health, pipeline runtime status, and paginated event history, streaming live events over WebSockets, and keeping heavy computer vision inference decoupled from API request handlers.
+- Decision: Implement the `backend/app` package using FastAPI, Pydantic, and SQLite. Store event metadata in SQLite with `EventRepository` supporting cursor-based pagination, event type / camera filters, and WAL mode; manage live WebSocket clients with `EventPublisher` guaranteeing that subscriber disconnects do not crash publishing; orchestrate event recording through `EventService`; manage video inference in a dedicated background daemon thread via `PipelineService`; add `--db` persistence flag to `main.py` CLI; standardize error responses to `{"error": {"code": "...", "message": "..."}}` adhering to `05_API_SPECIFICATION.md`.
+- Alternatives Considered: Run inference synchronously inside FastAPI route handlers (rejected: blocks event loop and introduces high request latency); use heavyweight ORMs like SQLAlchemy (rejected: adds unnecessary dependencies; standard library `sqlite3` provides fast, clean, zero-dependency storage).
+- Consequences: Clear separation of computer vision processing and HTTP services; events survive application restarts; fully compatible with downstream Phase 5 React dashboard.
+
 ## Changelog
+### Phase 4 — Persistence and Backend (2026-10-10)
+- Defined Pydantic schemas (`EventResponse`, `EventListResponse`, `EventStreamMessage`, `HealthResponse`, `RuntimeStatusResponse`, `ErrorResponse`) adhering to `03_WORKFLOW_AND_DATA_CONTRACTS.md` and `05_API_SPECIFICATION.md`.
+- Implemented `EventRepository` using SQLite with WAL mode, parameterized queries, indexes on `occurred_at`, `camera_id`, and `event_type`, and cursor-based pagination (`limit`, `before`).
+- Implemented `EventPublisher` with thread-safe WebSocket subscriber management and safe client disconnect handling.
+- Implemented `EventService` coordinating persistence and WebSocket event dispatching.
+- Implemented `PipelineService` decoupling heavy YOLO inference into a background worker thread and tracking runtime status telemetry.
+- Implemented FastAPI REST and WebSocket routes:
+  - `GET /api/health`: Health status.
+  - `GET /api/status`: Runtime pipeline and video source telemetry.
+  - `GET /api/events`: Paginated event history with filtering and validation error handling.
+  - `WS /api/events/stream`: Live event stream broadcast.
+- Integrated SQLite persistence with root CLI (`main.py --db data/events.db`).
+- Added 31 new automated unit and integration tests across schemas, repository, REST endpoints, WebSockets, background pipeline lifecycle, and CLI persistence (total test suite: 83 passing tests).
+
+### Phase 3 — Event Engine (2026-10-10)
+- Implemented `rules.geometry` module with `Point`, `Polygon` (supporting normalized and pixel coordinates), ray-casting point-in-polygon algorithm with boundary inclusive policy, and reference point extraction (`bottom_center`, `center`, `bottom_left`, `bottom_right`).
+- Implemented `rules.schemas` with `ZoneState` enum and `DomainEvent` contract matching `03_WORKFLOW_AND_DATA_CONTRACTS.md` (UTC ISO-8601 timestamps, UUID identifiers, bounding box, confidence, camera ID, zone ID, and track ID).
+- Implemented `RestrictedZoneRule` with per-track outside -> inside state machine, duplicate suppression, exit & re-entry cooldowns, track expiry handling for lost tracks, and untracked detection fallback.
+- Implemented `RuleEngine` orchestrator supporting multiple rules, event listener dispatch, in-memory event history, and JSON configuration loader (`from_config_file`).
+- Created default zone configuration in `configs/rules.json`.
+- Integrated `RuleEngine` with `DetectionPipeline`, supporting backward-compatible 3-tuple return and optional 4-tuple with triggered events (`return_events=True`).
+- Enhanced `FrameAnnotator` to render zone polygon overlays (semi-transparent fill with active intrusion highlights) and alert count badge in the telemetry HUD.
+- Extended `main.py` CLI with `--rules` option, immediate console event alerts (`[EVENT] 🚨 ...`), and Phase 3 run summary metrics.
+- Added comprehensive unit and integration tests (22 new tests across geometry, schemas, zone rules, rule engine, pipeline integration, and CLI; total test suite: 52 passing tests).
+
+### Phase 2 — Multi-Object Tracking (2026-10-10)
+- Integrated Ultralytics YOLO tracking with ByteTrack (`bytetrack.yaml`) using `lapx` solver.
+- Extended `Detection` and `Track` schemas with optional `track_id` while maintaining 100% backward compatibility.
+- Implemented `ByteTrackerAdapter` with tracker configuration validation and safe state resets.
+- Added `track()` and `reset_tracker()` methods to `YOLODetector` with robust tensor and sequence parsing.
+- Enhanced `FrameAnnotator` to display track IDs (`#<track_id>`), consistent track-based colors, and active track counts.
+- Updated `DetectionPipeline` with `enable_tracking` toggle and `reset_tracker()` lifecycle handling.
+- Updated `main.py` CLI with `--track / --no-track` and `--tracker` arguments.
+- Added standalone Google Colab notebook `notebooks/LiveSight_Phase2_GPU_Tracking.ipynb` for cloud GPU experiments.
+- Created `configs/bytetrack.yaml` for local tracker configuration.
+- Added comprehensive unit and integration tests (30 passing tests).
+
 ### Phase 1 — Standalone Object Detection (2026-10-10)
 - Configured clean Python 3.10 virtual environment with `requirements.txt` and `.gitignore`.
 - Implemented `VideoSource` supporting webcams and local video files with actionable error reporting.
@@ -73,4 +134,5 @@ For every decision that changes architecture, dependencies, data contracts, or d
 - Initial documentation pack created.
 - Initial scope defined as local-first object detection, tracking, restricted-zone event rules, API, persistence, and dashboard.
 - Performance claims remain targets until benchmarked.
+
 

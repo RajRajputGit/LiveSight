@@ -1,0 +1,23 @@
+{
+  "zones": [
+    {
+      "zone_id": "restricted_zone_A",
+      "name": "Restricted Zone A",
+      "polygon": [
+        [0.2, 0.2],
+        [0.8, 0.2],
+        [0.8, 0.8],
+        [0.2, 0.8]
+      ],
+      "coordinate_type": "normalized",
+      "target_classes": ["person"],
+      "reference_point": "bottom_center",
+      "cooldown_seconds": 5.0,
+      "track_expiry_seconds": 2.0,
+      "reacquire_generates_alert": false,
+      "allow_untracked_events": true,
+      "untracked_cooldown_seconds": 5.0,
+      "min_confidence": 0.35
+    }
+  ]
+}

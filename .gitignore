@@ -50,3 +50,8 @@ data/
 # Operating System files
 .DS_Store
 Thumbs.db
+
+
+# Videos
+videos/
+video/

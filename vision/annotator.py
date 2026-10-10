@@ -29,8 +29,14 @@ def get_class_color(class_id: int) -> Tuple[int, int, int]:
     return DEFAULT_COLORS[class_id % len(DEFAULT_COLORS)]
 
 
+def get_detection_color(class_id: int, track_id: Optional[int] = None) -> Tuple[int, int, int]:
+    """Return a deterministic BGR color based on track ID (preferred) or class ID."""
+    key = track_id if track_id is not None else class_id
+    return DEFAULT_COLORS[key % len(DEFAULT_COLORS)]
+
+
 class FrameAnnotator:
-    """Renders bounding boxes, class labels, confidence scores, and diagnostic HUD on frames."""
+    """Renders bounding boxes, class labels, track IDs, confidence scores, and diagnostic HUD on frames."""
 
     def __init__(
         self,
@@ -49,30 +55,43 @@ class FrameAnnotator:
         detections: List[Detection],
         fps: Optional[float] = None,
         source_label: Optional[str] = None,
+        rules: Optional[Sequence[Any]] = None,
+        events: Optional[Sequence[Any]] = None,
     ) -> np.ndarray:
-        """Annotate frame with bounding boxes, labels, confidence scores, and FPS HUD.
+        """Annotate frame with bounding boxes, track IDs, labels, zones, and HUD.
 
         Args:
             frame: Input BGR image array.
-            detections: List of Detection instances.
+            detections: List of Detection instances (with optional track_id).
             fps: Optional current/smoothed FPS value to display.
             source_label: Optional source descriptor (e.g. 'Webcam [0]' or 'sample.mp4').
+            rules: Optional list of RestrictedZoneRule instances to draw.
+            events: Optional newly triggered DomainEvent instances to highlight.
 
         Returns:
             Annotated frame.
         """
         output = frame.copy()
+        height, width = output.shape[:2]
 
-        # 1. Draw each detection
+        # 0. Draw configured restricted zones first (underneath bounding boxes)
+        if rules:
+            self._draw_zones(output, rules, events or [])
+
+        # 1. Draw each detection / track
         for det in detections:
             x1, y1, x2, y2 = det.bbox.as_int_tuple()
-            color = get_class_color(det.class_id)
+            color = get_detection_color(det.class_id, det.track_id)
 
             # Draw bounding box
             cv2.rectangle(output, (x1, y1), (x2, y2), color, self.box_thickness)
 
-            # Format label: "person 85%"
-            label = f"{det.class_name} {det.confidence:.2f}"
+            # Format label: with track ID if available ("#3 person 0.85"), otherwise ("person 0.85")
+            if det.track_id is not None:
+                label = f"#{det.track_id} {det.class_name} {det.confidence:.2f}"
+            else:
+                label = f"{det.class_name} {det.confidence:.2f}"
+
             (text_w, text_h), baseline = cv2.getTextSize(
                 label, self.font, self.font_scale, self.font_thickness
             )
@@ -100,15 +119,75 @@ class FrameAnnotator:
             )
 
         # 2. Draw diagnostic HUD badge in top-left corner
-        self._draw_hud(output, fps, len(detections), source_label)
+        tracked_count = sum(1 for d in detections if d.track_id is not None)
+        alert_count = len(events) if events else 0
+        self._draw_hud(output, fps, len(detections), tracked_count, alert_count, source_label)
 
         return output
+
+    def _draw_zones(
+        self,
+        frame: np.ndarray,
+        rules: Sequence[Any],
+        events: Sequence[Any],
+    ) -> None:
+        """Render polygon zones and zone status on the frame."""
+        h, w = frame.shape[:2]
+        event_zone_ids = {getattr(e, "zone_id", None) for e in events}
+
+        overlay = frame.copy()
+
+        for rule in rules:
+            if not hasattr(rule, "get_pixel_polygon"):
+                continue
+
+            pixel_poly = rule.get_pixel_polygon(w, h)
+            pts = np.array(pixel_poly.as_numpy_points(), np.int32).reshape((-1, 1, 2))
+
+            # Has intrusion alert in this frame or active inside tracks?
+            has_inside_tracks = bool(getattr(rule, "get_active_inside_tracks", lambda: [])())
+            has_alert = getattr(rule, "zone_id", None) in event_zone_ids or has_inside_tracks
+
+            if has_alert:
+                border_color = (0, 0, 255)       # Red for active intrusion
+                fill_color = (0, 0, 200)
+                status_text = f"ZONE: {rule.name} [ALERT]"
+            else:
+                border_color = (255, 180, 0)     # Cyan/Amber for safe monitoring
+                fill_color = (200, 120, 0)
+                status_text = f"ZONE: {rule.name}"
+
+            # Semi-transparent polygon fill
+            cv2.fillPoly(overlay, [pts], fill_color)
+
+            # Polygon outline
+            cv2.polylines(frame, [pts], isClosed=True, color=border_color, thickness=2)
+
+            # Draw zone label
+            if len(pixel_poly.vertices) > 0:
+                first_pt = pixel_poly.vertices[0]
+                label_pos = (max(10, int(first_pt.x)), max(25, int(first_pt.y) - 8))
+                cv2.putText(
+                    frame,
+                    status_text,
+                    label_pos,
+                    self.font,
+                    0.45,
+                    border_color,
+                    1,
+                    lineType=cv2.LINE_AA,
+                )
+
+        # Blend overlay (alpha = 0.25)
+        cv2.addWeighted(overlay, 0.22, frame, 0.78, 0, frame)
 
     def _draw_hud(
         self,
         frame: np.ndarray,
         fps: Optional[float],
         detection_count: int,
+        tracked_count: int,
+        alert_count: int,
         source_label: Optional[str],
     ) -> None:
         """Draw diagnostic telemetry banner on top-left of the frame."""
@@ -120,9 +199,16 @@ class FrameAnnotator:
             hud_lines.append("FPS: --.-")
 
         hud_lines.append(f"Objects: {detection_count}")
+        if tracked_count > 0:
+            hud_lines.append(f"Tracks: {tracked_count}")
+
+        if alert_count > 0:
+            hud_lines.append(f"Alerts: {alert_count}")
 
         if source_label:
             hud_lines.append(f"Source: {source_label}")
+
+
 
         hud_text = "  |  ".join(hud_lines)
         hint_text = "Press 'q' to quit"

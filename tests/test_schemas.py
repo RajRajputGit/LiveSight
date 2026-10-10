@@ -47,3 +47,19 @@ def test_detection_invalid_confidence():
 
     with pytest.raises(ValueError, match="Confidence must be between 0.0 and 1.0"):
         Detection(class_id=0, class_name="person", confidence=-0.1, bbox=bbox)
+
+
+def test_detection_with_track_id():
+    bbox = BoundingBox(x1=5.0, y1=10.0, x2=50.0, y2=100.0)
+    det = Detection(class_id=0, class_name="person", confidence=0.91, bbox=bbox, track_id=7)
+
+    assert det.track_id == 7
+    data = det.to_dict()
+    assert data["track_id"] == 7
+
+
+def test_detection_invalid_track_id_type():
+    bbox = BoundingBox(x1=0, y1=0, x2=10, y2=10)
+    with pytest.raises(TypeError, match="track_id must be an int or None"):
+        Detection(class_id=0, class_name="person", confidence=0.5, bbox=bbox, track_id="invalid_id")
+

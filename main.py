@@ -38,7 +38,7 @@ from vision.source import VideoSource
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
     parser = argparse.ArgumentParser(
-        description="LiveSight Phase 1 - Real-Time YOLO Object Detection",
+        description="LiveSight Phase 3 - Real-Time AI Vision & Event Engine",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument(
@@ -61,6 +61,30 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=0.35,
         help="Confidence threshold between 0.0 and 1.0.",
+    )
+    parser.add_argument(
+        "--track",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable ByteTrack multi-object tracking (use --no-track for detection only).",
+    )
+    parser.add_argument(
+        "--tracker",
+        type=str,
+        default="bytetrack.yaml",
+        help="Tracker YAML identifier or configuration file path.",
+    )
+    parser.add_argument(
+        "--rules",
+        type=str,
+        default="configs/rules.json",
+        help="Path to rules configuration JSON file (empty string to disable rules).",
+    )
+    parser.add_argument(
+        "--db",
+        type=str,
+        default="data/events.db",
+        help="Path to SQLite database file to persist detected events (empty string to disable).",
     )
     parser.add_argument(
         "--device",
@@ -94,13 +118,17 @@ def run_detection(
     model_arg: str = "yolo11n.pt",
     conf_arg: float = 0.35,
     device_arg: Optional[str] = None,
+    track: bool = True,
+    tracker_arg: str = "bytetrack.yaml",
+    rules_path: Optional[str] = "configs/rules.json",
+    db_path: Optional[str] = "data/events.db",
     headless: bool = False,
     output_path: Optional[str] = None,
     max_frames: Optional[int] = None,
 ) -> int:
-    """Execute the detection loop on the chosen source."""
+    """Execute the detection, tracking, and event engine loop on the chosen source."""
     print("=" * 65)
-    print(" LiveSight: Real-Time AI Object Detection (Phase 1)")
+    print(" LiveSight: Real-Time AI Vision, Tracking & Event Engine (Phase 4)")
     print("=" * 65)
 
     # 1. Initialize Video Source
@@ -140,9 +168,46 @@ def run_detection(
         f"({detector.model_name_or_path})"
     )
 
-    # 3. Setup Pipeline & Optional Video Writer
+    # 3. Setup Rule Engine
+    rule_engine = None
+    if rules_path and str(rules_path).strip():
+        rules_file = Path(rules_path).expanduser().resolve()
+        if rules_file.exists():
+            try:
+                from rules.engine import RuleEngine
+
+                rule_engine = RuleEngine.from_config_file(rules_file)
+                print(
+                    f"[+] Rule Engine active: {len(rule_engine.rules)} zone rules loaded ({rules_file.name})"
+                )
+            except Exception as err:
+                print(f"[!] Warning: Failed to load rules from '{rules_file}': {err}")
+        else:
+            print(f"[*] Rules file '{rules_path}' not found. Running without active zone rules.")
+
+    # 4. Setup Event Persistence (Phase 4)
+    event_repo = None
+    if db_path and str(db_path).strip():
+        try:
+            from backend.app.repositories.event_repository import EventRepository
+
+            event_repo = EventRepository(database_path=db_path)
+            print(f"[+] Event persistence active: SQLite ({db_path})")
+        except Exception as err:
+            print(f"[!] Warning: Failed to initialize SQLite database '{db_path}': {err}")
+
+    # 5. Setup Pipeline & Optional Video Writer
     annotator = FrameAnnotator()
-    pipeline = DetectionPipeline(detector=detector, annotator=annotator)
+    pipeline = DetectionPipeline(
+        detector=detector,
+        annotator=annotator,
+        enable_tracking=track,
+        tracker_config=tracker_arg,
+        rule_engine=rule_engine,
+    )
+
+    tracking_desc = f"Enabled ({tracker_arg})" if track else "Disabled (detection only)"
+    print(f"[+] Tracking mode: {tracking_desc}")
 
     writer: Optional[cv2.VideoWriter] = None
     if output_path:
@@ -157,7 +222,8 @@ def run_detection(
         )
         print(f"[+] Output will be saved to: {out_p}")
 
-    window_name = "LiveSight - Phase 1 Object Detection (Press 'q' to quit)"
+
+    window_name = "LiveSight - Detection & Tracking (Press 'q' to quit)"
     if not headless:
         cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
         cv2.resizeWindow(window_name, min(source.width, 1280), min(source.height, 720))
@@ -170,6 +236,7 @@ def run_detection(
 
     start_wall_time = time.time()
     exit_reason = "Completed (End of stream)"
+    total_events_triggered = 0
 
     try:
         for frame_idx, frame in source:
@@ -177,12 +244,29 @@ def run_detection(
                 exit_reason = f"Reached max frames limit ({max_frames})"
                 break
 
-            # Run detection & annotate
-            annotated_frame, detections, fps = pipeline.process_frame(
+            # Run detection, tracking, rules, and annotation
+            annotated_frame, detections, fps, new_events = pipeline.process_frame(
                 frame=frame,
                 source_label=source_label,
                 draw_annotations=True,
+                return_events=True,
             )
+
+            # Announce newly triggered events immediately and persist to SQLite
+            if new_events:
+                total_events_triggered += len(new_events)
+                for ev in new_events:
+                    track_str = f"Track #{ev.track_id}" if ev.track_id is not None else "untracked"
+                    print(
+                        f"\n[EVENT] 🚨 {ev.event_type} | Zone: {ev.zone_id} | "
+                        f"Class: {ev.object_class} ({track_str}) | "
+                        f"Conf: {ev.confidence:.2f} | Time: {ev.occurred_at}"
+                    )
+                    if event_repo is not None:
+                        try:
+                            event_repo.save(ev)
+                        except Exception as db_err:
+                            print(f"[!] Warning: Failed to persist event {ev.event_id}: {db_err}")
 
             # Write to output file if requested
             if writer is not None:
@@ -199,10 +283,17 @@ def run_detection(
 
             # Diagnostic log every 30 frames
             if (frame_idx + 1) % 30 == 0:
+                active_tracks = sum(1 for d in detections if d.track_id is not None)
+                track_info = f" | Tracks: {active_tracks}" if track else ""
+                event_info = (
+                    f" | Alerts: {pipeline.rule_engine.total_events_emitted}"
+                    if pipeline.rule_engine
+                    else ""
+                )
                 print(
                     f"    Frame {frame_idx + 1:>5} | "
                     f"FPS: {fps:5.1f} | "
-                    f"Objects in frame: {len(detections)}"
+                    f"Objects: {len(detections)}{track_info}{event_info}"
                 )
 
     except KeyboardInterrupt:
@@ -214,6 +305,7 @@ def run_detection(
         return 1
     finally:
         # Resource cleanup
+        pipeline.reset_tracker()
         source.release()
         if writer is not None:
             writer.release()
@@ -224,14 +316,19 @@ def run_detection(
     elapsed_time = time.time() - start_wall_time
     total_frames = pipeline.total_frames
     avg_fps = (total_frames / elapsed_time) if elapsed_time > 0 else 0.0
+    total_events = total_events_triggered
 
     print("-" * 65)
-    print(" LiveSight Phase 1 Run Summary")
+    print(" LiveSight Phase 4 Run Summary")
     print("-" * 65)
     print(f"  Reason:           {exit_reason}")
+    print(f"  Tracking:         {tracking_desc}")
     print(f"  Total Frames:     {total_frames}")
     print(f"  Elapsed Time:     {elapsed_time:.2f} seconds")
     print(f"  Average FPS:      {avg_fps:.1f}")
+    print(f"  Events Triggered: {total_events}")
+    if event_repo:
+        print(f"  Database:         {db_path}")
     if output_path:
         print(f"  Saved Video:      {output_path}")
     print("=" * 65)
@@ -247,11 +344,17 @@ def main() -> None:
         model_arg=args.model,
         conf_arg=args.conf,
         device_arg=args.device,
+        track=args.track,
+        tracker_arg=args.tracker,
+        rules_path=args.rules,
+        db_path=args.db,
         headless=args.headless,
         output_path=args.output,
         max_frames=args.max_frames,
     )
     sys.exit(code)
+
+
 
 
 if __name__ == "__main__":

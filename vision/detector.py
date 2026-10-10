@@ -62,8 +62,59 @@ class YOLODetector:
             return self.model.names
         return {}
 
+    def _parse_boxes(self, boxes, has_tracking: bool = False) -> List[Detection]:
+        """Normalize Ultralytics Boxes into LiveSight Detection contract instances."""
+        if boxes is None or len(boxes) == 0:
+            return []
+
+        names = self.class_names
+        detections: List[Detection] = []
+
+        track_ids: Optional[List[int]] = None
+        if has_tracking and hasattr(boxes, "id") and boxes.id is not None:
+            try:
+                track_ids = [int(tid) for tid in boxes.id.int().tolist()]
+            except Exception:
+                track_ids = None
+
+        for i, box in enumerate(boxes):
+            coords = box.xyxy[0]
+            if hasattr(coords, "tolist"):
+                coords = coords.tolist()
+            x1, y1, x2, y2 = float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3])
+
+            # Ensure coordinate bounds are sane
+            x1, x2 = min(x1, x2), max(x1, x2)
+            y1, y2 = min(y1, y2), max(y1, y2)
+
+            conf_val = box.conf[0]
+            if hasattr(conf_val, "item"):
+                conf_val = conf_val.item()
+            conf = float(conf_val)
+
+            cls_val = box.cls[0]
+            if hasattr(cls_val, "item"):
+                cls_val = cls_val.item()
+            cls_id = int(cls_val)
+
+            cls_name = names.get(cls_id, f"class_{cls_id}")
+            track_id = track_ids[i] if (track_ids is not None and i < len(track_ids)) else None
+
+
+            detections.append(
+                Detection(
+                    class_id=cls_id,
+                    class_name=cls_name,
+                    confidence=conf,
+                    bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
+                    track_id=track_id,
+                )
+            )
+
+        return detections
+
     def detect(self, frame: np.ndarray) -> List[Detection]:
-        """Run object detection inference on a frame.
+        """Run object detection inference on a frame without tracking.
 
         Args:
             frame: Input image/frame in BGR format (numpy array).
@@ -87,36 +138,54 @@ class YOLODetector:
                 f"Inference failed on frame of shape {frame.shape}: {exc}"
             ) from exc
 
-        detections: List[Detection] = []
         if not results:
-            return detections
+            return []
 
-        first_res = results[0]
-        boxes = getattr(first_res, "boxes", None)
-        if boxes is None or len(boxes) == 0:
-            return detections
+        return self._parse_boxes(getattr(results[0], "boxes", None), has_tracking=False)
 
-        names = self.class_names
+    def track(
+        self,
+        frame: np.ndarray,
+        tracker: str = "bytetrack.yaml",
+        persist: bool = True,
+    ) -> List[Detection]:
+        """Run multi-object tracking on a sequential frame with ByteTrack.
 
-        for box in boxes:
-            coords = box.xyxy[0].tolist()
-            x1, y1, x2, y2 = float(coords[0]), float(coords[1]), float(coords[2]), float(coords[3])
+        Args:
+            frame: Input image/frame in BGR format (numpy array).
+            tracker: Tracker YAML identifier or path ('bytetrack.yaml').
+            persist: Keep tracks alive across consecutive frames.
 
-            # Ensure coordinate bounds are sane
-            x1, x2 = min(x1, x2), max(x1, x2)
-            y1, y2 = min(y1, y2), max(y1, y2)
+        Returns:
+            List of normalized Detection objects with track_id populated when assigned.
+        """
+        if frame is None or not isinstance(frame, np.ndarray) or frame.size == 0:
+            return []
 
-            conf = float(box.conf[0])
-            cls_id = int(box.cls[0])
-            cls_name = names.get(cls_id, f"class_{cls_id}")
-
-            detections.append(
-                Detection(
-                    class_id=cls_id,
-                    class_name=cls_name,
-                    confidence=conf,
-                    bbox=BoundingBox(x1=x1, y1=y1, x2=x2, y2=y2),
-                )
+        try:
+            results = self.model.track(
+                frame,
+                conf=self.confidence_threshold,
+                classes=self.classes,
+                device=self.device,
+                tracker=tracker,
+                persist=persist,
+                verbose=False,
             )
+        except Exception as exc:
+            raise InferenceError(
+                f"Tracking failed on frame of shape {frame.shape} with tracker '{tracker}': {exc}"
+            ) from exc
 
-        return detections
+        if not results:
+            return []
+
+        return self._parse_boxes(getattr(results[0], "boxes", None), has_tracking=True)
+
+    def reset_tracker(self) -> None:
+        """Safely reset ByteTrack tracking state and track ID counter."""
+        from vision.tracker import ByteTrackerAdapter
+
+        adapter = ByteTrackerAdapter()
+        adapter.reset(model=self.model)
+
