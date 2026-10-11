@@ -82,7 +82,39 @@ For every decision that changes architecture, dependencies, data contracts, or d
 - Alternatives Considered: Run inference synchronously inside FastAPI route handlers (rejected: blocks event loop and introduces high request latency); use heavyweight ORMs like SQLAlchemy (rejected: adds unnecessary dependencies; standard library `sqlite3` provides fast, clean, zero-dependency storage).
 - Consequences: Clear separation of computer vision processing and HTTP services; events survive application restarts; fully compatible with downstream Phase 5 React dashboard.
 
+### ADR-010: React Dashboard Architecture and Event Stream Reconciliation
+- Status: Accepted
+- Date: 2026-10-10
+- Context: Phase 5 requires a responsive monitoring interface that connects to the Phase 4 FastAPI REST endpoints and WebSocket stream, visualizes pipeline runtime status, presents live and historical security events, handles disconnections and re-connections gracefully without duplicating events, and honors ADR-005 (event metadata and spatial bounding boxes rather than raw frame streaming).
+- Decision: Implement the frontend using React 18, TypeScript, Vite, and Tailwind CSS.
+  - Implement structured API clients (`apiClient`, `statusApi`, `eventsApi`) with custom `ApiError` mapping to backend standardized error envelopes (`05_API_SPECIFICATION.md`).
+  - Implement `useEventStream` with bounded exponential backoff (`1s -> 2s -> 4s -> 10s max`) and reconnection reconciliation hook.
+  - Implement `useEventHistory` with $O(1)$ `event_id` deduplication across historical fetches and live WebSocket streams; upon socket reconnection, trigger reconciliation queries to recover missed events without duplicating visible cards.
+  - Implement `CameraPreviewPlaceholder` rendering spatial HUD telemetry, active target restricted zone boundaries, and real-time bounding box overlays `[x1, y1, x2, y2]`, with clear architecture notes explaining ADR-005.
+  - Build UI with robust loading skeletons, empty state placeholders, error alert banners with retry actions, and filter controls.
+- Alternatives Considered: Relay raw MJPEG or canvas video frames through WebSocket (rejected: violates ADR-005 and bloats backend event stream); use third-party heavyweight state managers like Redux (rejected: custom React hooks provide clean, zero-dependency, testable state management).
+- Consequences: Lightweight, fast-loading, responsive dashboard; resilient to backend restarts and network dropouts; fully tested with Vitest and React Testing Library.
+
 ## Changelog
+### Phase 5 — Dashboard (2026-10-10)
+- Initialized React application with Vite, TypeScript, and Tailwind CSS in `frontend/`.
+- Created standardized TypeScript types (`types/status.ts`, `types/events.ts`, `types/api.ts`) conforming to backend Pydantic schemas.
+- Implemented HTTP API client (`api/client.ts`, `api/statusApi.ts`, `api/eventsApi.ts`) with robust error handling mapping to backend `ErrorResponse` contracts.
+- Implemented `useSystemStatus` hook for periodic polling and telemetry updates from `GET /api/status`.
+- Implemented `useEventStream` hook subscribing to `WS /api/events/stream` with bounded backoff reconnection and reconnect notification.
+- Implemented `useEventHistory` hook with strict `event_id` deduplication, cursor-based pagination (`next_cursor`), filter support (`event_type`, `camera_id`), and historical reconciliation on reconnect.
+- Built UI components:
+  - `Header`: System branding, real-time clock, WebSocket connection status pill, manual refresh trigger.
+  - `ConnectionBadge`: Visual indicators for `Connected`, `Connecting`, `Reconnecting`, and `Disconnected` states with manual reconnect button.
+  - `SystemStatusCard`: Pipeline status badge (`RUNNING`, `IDLE`, `FAILED`), camera identifier, source type, YOLO model readiness, ByteTrack mode, and heartbeat timestamps.
+  - `CameraPreviewPlaceholder`: Spatial surveillance HUD rendering zone boundaries, live event bounding box coordinates, and ADR-005 architectural notice.
+  - `EventFilters`: Filter by event type and camera source, with active event counter and filter reset.
+  - `EventCard`: Structured display of timestamp, zone ID, object class, track ID, confidence score, bounding box, and event ID with live highlight animation.
+  - `EventList`: Skeletons for loading state, empty state placeholder, list of cards, and cursor pagination button.
+  - `ErrorBanner`: Contextual API communication error banner with error code pill and retry trigger.
+- Added comprehensive frontend test suite with Vitest and React Testing Library (18 tests passing across components, hooks, and API clients).
+- Verified production build (`tsc && vite build`) and updated setup instructions in `README.md`.
+
 ### Phase 4 — Persistence and Backend (2026-10-10)
 - Defined Pydantic schemas (`EventResponse`, `EventListResponse`, `EventStreamMessage`, `HealthResponse`, `RuntimeStatusResponse`, `ErrorResponse`) adhering to `03_WORKFLOW_AND_DATA_CONTRACTS.md` and `05_API_SPECIFICATION.md`.
 - Implemented `EventRepository` using SQLite with WAL mode, parameterized queries, indexes on `occurred_at`, `camera_id`, and `event_type`, and cursor-based pagination (`limit`, `before`).

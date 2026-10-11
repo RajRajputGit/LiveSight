@@ -6,6 +6,7 @@
 - **Phase 2**: Multi-Object Tracking with **ByteTrack** (`bytetrack.yaml`).
 - **Phase 3**: Rule-Based **Event Engine** for spatial zone monitoring (`rules.json`).
 - **Phase 4**: **Persistence & Backend API** with SQLite, FastAPI, and WebSockets.
+- **Phase 5**: **Real-Time Monitoring Dashboard** with React, TypeScript, Vite, and Tailwind CSS.
 
 ---
 
@@ -296,6 +297,20 @@ LiveSight/
 │   └── test_cli.py         # main.py CLI integration tests (--track, --tracker, --rules, --db)
 ├── scripts/
 │   └── create_sample_video.py # Helper script to create test video
+├── frontend/               # Phase 5 React Monitoring Dashboard
+│   ├── package.json        # Dependencies (React 18, Vite, TypeScript, Vitest, Tailwind)
+│   ├── vite.config.ts      # Vite dev server with proxy to backend:8000 & Vitest configuration
+│   ├── tsconfig.json       # TypeScript configuration
+│   ├── tailwind.config.js  # Dark theme Tailwind styling
+│   ├── src/
+│   │   ├── main.tsx        # React DOM entry point
+│   │   ├── App.tsx         # Dashboard layout, hooks integration, live event flash
+│   │   ├── types/          # TypeScript definitions (status, events, api)
+│   │   ├── api/            # API client layer (statusApi, eventsApi, client with error wrapping)
+│   │   ├── hooks/          # React hooks (useSystemStatus, useEventStream, useEventHistory)
+│   │   ├── components/     # UI components (Header, SystemStatusCard, CameraPreviewPlaceholder,
+│   │   │                   #    EventList, EventCard, EventFilters, ConnectionBadge, ErrorBanner)
+│   │   └── test/           # Frontend tests (components.test.tsx, hooks.test.ts, api.test.ts)
 ├── ai_vision_project_docs/ # Architecture and design documentation
 ├── main.py                 # CLI entry point
 ├── requirements.txt        # Project dependencies (CV, ByteTrack, FastAPI, Pydantic, Uvicorn)
@@ -305,15 +320,61 @@ LiveSight/
 
 ---
 
+## 🖥️ Phase 5: React Monitoring Dashboard
+
+The LiveSight frontend dashboard is built with **React 18**, **TypeScript**, **Vite**, and **Tailwind CSS**. It provides a responsive, dark-mode security console that connects to the FastAPI backend and live WebSocket stream.
+
+### 1. Launching the Backend API Server
+In terminal 1:
+```bash
+source .venv/bin/activate
+uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+```
+
+### 2. Launching the React Dashboard
+In terminal 2:
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open your browser to:
+- **Dashboard UI**: `http://localhost:5173`
+- **Swagger API Docs**: `http://127.0.0.1:8000/docs`
+
+### 3. Key Dashboard Features
+- **Real-Time WebSocket Stream (`WS /api/events/stream`)**: Subscribes to live intrusion events, automatically updates the event feed with animated entry highlights, and handles disconnects.
+- **Bounded Backoff Reconnection**: Reconnects on socket drop with exponential backoff (`1s -> 2s -> 4s -> 10s max`).
+- **Reconnect Historical Reconciliation**: Automatically queries historical events upon reconnecting to recover any missed events during network disruption without creating duplicates.
+- **Event Deduplication**: Deduplicates events strictly by `event_id` across both REST historical fetches and live WebSocket emissions.
+- **Pipeline Telemetry (`GET /api/status`)**: Polls the background YOLO inference worker, displaying pipeline state (`RUNNING`, `IDLE`, `FAILED`), camera identifier, source type, model status, and last processed frame timestamp.
+- **Spatial Surveillance Viewport (ADR-005)**: Renders a spatial HUD displaying the target restricted zone and the active bounding box `[x1, y1, x2, y2]`, object class, and confidence score for the most recent detection.
+  > **Note on Video Streaming**: As specified in architecture ADR-005, Phase 5 transmits real-time event metadata and bounding boxes over WebSockets. Raw video streaming (RTSP/WebRTC) is scheduled for Phase 7.
+- **Interactive Filtering & Pagination**: Filter events by event type and camera source ID; paginates historical events using cursor pagination (`next_cursor`).
+- **Resilient UI States**: Full loading skeletons, empty state placeholders, and API error banners with inline retry actions.
+
+---
+
 ## 🧪 Running Automated Tests
 
-Run the complete test suite with `pytest`:
-
+### Python Backend Test Suite (Pytest)
 ```bash
+# Run all 83 backend unit and integration tests
 pytest -v
 ```
 
-All 83 unit and integration tests run entirely locally on CPU without requiring an external camera or GPU.
+### React Frontend Test Suite (Vitest)
+```bash
+# Run all 18 frontend unit and hook tests
+cd frontend
+npm test
+
+# Verify production build and TypeScript checks
+npm run build
+```
+
+All 83 backend tests and 18 frontend tests run entirely locally on CPU and Node without requiring external hardware or cameras.
 
 ---
 

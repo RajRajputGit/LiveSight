@@ -127,3 +127,27 @@ def test_cli_with_rules_flag(tmp_path: Path):
     assert "Events Triggered:" in result.stdout
 
 
+def test_cli_with_db_flag(tmp_path: Path):
+    test_video = tmp_path / "cli_db_test.mp4"
+    db_file = tmp_path / "events.db"
+    create_synthetic_test_video(test_video, num_frames=8, width=320, height=240, fps=25)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "main.py",
+            "--source",
+            str(test_video),
+            "--db",
+            str(db_file),
+            "--headless",
+            "--max-frames",
+            "3",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "Event persistence active: SQLite" in result.stdout
+
+
